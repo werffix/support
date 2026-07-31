@@ -1,0 +1,22 @@
+[Unit]
+Description=Support Tickets Telegram Bot (aiogram 3)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=supportbot
+Group=supportbot
+WorkingDirectory=/opt/support_bot
+EnvironmentFile=/opt/support_bot/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/support_bot/venv/bin/python -m bot
+Restart=always
+RestartSec=5
+
+# (Опционально) дополнительные ограничения безопасности
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
