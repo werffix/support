@@ -1,4 +1,5 @@
 import logging
+import time
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ContentType
@@ -11,10 +12,21 @@ from aiogram.types import CallbackQuery, Message
 from config import settings
 from database.db import db
 from keyboards.reply import main_menu_keyboard
+from utils.throttle import RateLimiter
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="user")
+
+message_limiter = RateLimiter(
+    limit=settings.antispam_messages,
+    window=settings.antispam_window_seconds,
+)
+ticket_limiter = RateLimiter(
+    limit=1,
+    window=settings.antispam_ticket_cooldown_seconds,
+)
+_antispam_last_warning: dict[int, float] = {}
 
 MEDIA_CONTENT_TYPES = {
     ContentType.TEXT,
@@ -83,16 +95,55 @@ async def on_user_message(message: Message, state: FSMContext, bot: Bot) -> None
     if message.content_type == ContentType.TEXT and message.text.startswith("/"):
         return
 
+    if settings.antispam_enabled and not message_limiter.allow(message.from_user.id):
+        await _warn_antispam(message)
+        return
+
     ticket = await db.get_open_ticket(message.from_user.id)
+
+    if await state.get_state() == TicketStates.waiting_for_message.state:
+        if ticket is not None:
+            await _forward_to_thread(message, ticket["thread_id"])
+        else:
+            await _create_and_forward(message, bot)
+        await state.clear()
+        return
+
     if ticket is not None:
         await _forward_to_thread(message, ticket["thread_id"])
     else:
-        await _create_and_forward(message, bot)
-    await state.clear()
+        await message.answer(
+            "📋 У вас нет открытого обращения.\n\n"
+            "Нажмите кнопку ниже, чтобы создать новое обращение.",
+            reply_markup=main_menu_keyboard(),
+        )
+
+
+async def _warn_antispam(message: Message) -> None:
+    user_id = message.from_user.id
+    now = time.monotonic()
+    last = _antispam_last_warning.get(user_id, 0.0)
+    if now - last < settings.antispam_window_seconds:
+        return
+    _antispam_last_warning[user_id] = now
+    try:
+        await message.answer(
+            "🐢 Вы отправляете сообщения слишком быстро. "
+            "Подождите немного и повторите попытку."
+        )
+    except TelegramAPIError as exc:
+        logger.debug("Failed to send antispam warning to user %s: %s", user_id, exc)
 
 
 async def _create_and_forward(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
+    if settings.antispam_enabled and not ticket_limiter.allow(user_id):
+        await message.answer(
+            "⏳ Вы недавно создавали обращение. "
+            "Подождите немного перед созданием нового."
+        )
+        return
+
     ticket_id = await db.create_ticket(user_id)
     title = ticket_title(ticket_id, user_id, "🟢")
 
@@ -104,6 +155,7 @@ async def _create_and_forward(message: Message, bot: Bot) -> None:
     except TelegramAPIError as exc:
         logger.error("Failed to create forum topic for user %s: %s", user_id, exc)
         await db.delete_ticket(ticket_id)
+        ticket_limiter.forget(user_id)
         await message.answer("⚠️ Не удалось создать обращение. Попробуйте чуть позже.")
         return
 

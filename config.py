@@ -13,12 +13,25 @@ class Settings:
     db_path: str
     close_topic_on_ticket_close: bool
     log_level: str
+    antispam_enabled: bool
+    antispam_messages: int
+    antispam_window_seconds: int
+    antispam_ticket_cooldown_seconds: int
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _as_int(value: str | None, default: int) -> int:
+    if value is None or not value.strip():
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
 
 
 def load_settings() -> Settings:
@@ -41,6 +54,10 @@ def load_settings() -> Settings:
         db_path=os.getenv("DB_PATH", "tickets.db"),
         close_topic_on_ticket_close=_as_bool(os.getenv("CLOSE_TOPIC_ON_TICKET_CLOSE"), False),
         log_level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        antispam_enabled=_as_bool(os.getenv("ANTISPAM_ENABLED"), True),
+        antispam_messages=_as_int(os.getenv("ANTISPAM_MESSAGES"), 5),
+        antispam_window_seconds=_as_int(os.getenv("ANTISPAM_WINDOW_SECONDS"), 30),
+        antispam_ticket_cooldown_seconds=_as_int(os.getenv("ANTISPAM_TICKET_COOLDOWN_SECONDS"), 60),
     )
 
 

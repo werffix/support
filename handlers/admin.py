@@ -8,6 +8,7 @@ from aiogram.types import Message
 from config import settings
 from database.db import db
 from handlers.user import ticket_title
+from keyboards.reply import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +103,9 @@ async def _close_ticket(bot: Bot, message: Message) -> None:
             chat_id=ticket["user_id"],
             text=(
                 f"🔒 Ваш тикет <b>#{ticket['id']}</b> закрыт.\n"
-                "Если появятся вопросы — напишите нам, и мы создадим новый тикет."
+                "Если появятся новые вопросы — нажмите кнопку «Создать обращение»."
             ),
+            reply_markup=main_menu_keyboard(),
         )
     except TelegramForbiddenError:
         logger.warning(
