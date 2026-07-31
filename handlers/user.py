@@ -1,5 +1,6 @@
 import logging
 import math
+from datetime import datetime
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ContentType
@@ -75,6 +76,11 @@ async def cmd_cancel(message: Message, state: FSMContext) -> None:
 @router.callback_query(F.data == "create_ticket")
 async def on_create_ticket(callback: CallbackQuery, state: FSMContext) -> None:
     user = callback.from_user
+    mute = await db.is_muted(user.id)
+    if mute is not None:
+        await callback.answer("Вы замьючены и не можете создавать обращения", show_alert=True)
+        return
+
     ticket = await db.get_open_ticket(user.id)
     if ticket is not None:
         await callback.answer("У вас уже есть открытое обращение", show_alert=True)
@@ -96,6 +102,11 @@ async def on_user_message(message: Message, state: FSMContext, bot: Bot) -> None
     if message.content_type not in MEDIA_CONTENT_TYPES:
         return
     if message.content_type == ContentType.TEXT and message.text.startswith("/"):
+        return
+
+    mute = await db.is_muted(message.from_user.id)
+    if mute is not None:
+        await _notify_muted(message, mute)
         return
 
     if settings.antispam_enabled and not message_limiter.allow(message.from_user.id):
@@ -132,6 +143,17 @@ async def _warn_antispam(message: Message) -> None:
         )
     except TelegramAPIError as exc:
         logger.debug("Failed to send antispam warning to user %s: %s", user_id, exc)
+
+
+async def _notify_muted(message: Message, mute: dict) -> None:
+    until = datetime.fromisoformat(mute["until_at"])
+    text = f"🔇 Вы замьючены до {until:%Y-%m-%d %H:%M} (UTC)."
+    if mute.get("reason"):
+        text += f"\nПричина: {mute['reason']}"
+    try:
+        await message.answer(text)
+    except TelegramAPIError as exc:
+        logger.debug("Failed to notify muted user %s: %s", message.from_user.id, exc)
 
 
 async def _create_and_forward(message: Message, bot: Bot) -> None:

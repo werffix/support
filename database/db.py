@@ -19,6 +19,17 @@ CREATE TABLE IF NOT EXISTS tickets (
 CREATE INDEX IF NOT EXISTS idx_tickets_user_id   ON tickets (user_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_thread_id ON tickets (thread_id);
 CREATE INDEX IF NOT EXISTS idx_tickets_status    ON tickets (status);
+
+CREATE TABLE IF NOT EXISTS mutes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id     INTEGER NOT NULL,
+    admin_id    INTEGER,
+    reason      TEXT    NOT NULL DEFAULT '',
+    until_at    TEXT    NOT NULL,
+    created_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_mutes_user_id ON mutes (user_id);
 """
 
 
@@ -95,6 +106,65 @@ class Database:
                 (_now(), ticket_id),
             )
             await self._conn.commit()
+
+    async def reopen_ticket(self, ticket_id: int) -> None:
+        async with self._lock:
+            await self._conn.execute(
+                "UPDATE tickets SET status = 'open', closed_at = NULL WHERE id = ?",
+                (ticket_id,),
+            )
+            await self._conn.commit()
+
+    async def mute_user(self, user_id: int, admin_id: int, until_at: str, reason: str = "") -> None:
+        async with self._lock:
+            await self._conn.execute("DELETE FROM mutes WHERE user_id = ?", (user_id,))
+            await self._conn.execute(
+                "INSERT INTO mutes (user_id, admin_id, reason, until_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (user_id, admin_id, reason, until_at, _now()),
+            )
+            await self._conn.commit()
+
+    async def is_muted(self, user_id: int) -> dict | None:
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT * FROM mutes WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            mute = dict(row)
+            until = datetime.fromisoformat(mute["until_at"])
+            if until <= datetime.now(timezone.utc):
+                return None
+            return mute
+
+    async def get_stats(self) -> dict:
+        async with self._lock:
+            total = await self._fetch_scalar("SELECT COUNT(*) FROM tickets")
+            open_count = await self._fetch_scalar(
+                "SELECT COUNT(*) FROM tickets WHERE status = 'open'"
+            )
+            today = await self._fetch_scalar(
+                "SELECT COUNT(*) FROM tickets WHERE created_at LIKE ?",
+                (f"{_now()[:10]}%",),
+            )
+            users = await self._fetch_scalar(
+                "SELECT COUNT(DISTINCT user_id) FROM tickets"
+            )
+        return {
+            "total": total,
+            "open": open_count,
+            "closed": total - open_count,
+            "today": today,
+            "users": users,
+        }
+
+    async def _fetch_scalar(self, query: str, params: tuple = ()) -> int:
+        cursor = await self._conn.execute(query, params)
+        row = await cursor.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
 
 db = Database()
