@@ -78,7 +78,7 @@ async def on_create_ticket(callback: CallbackQuery, state: FSMContext) -> None:
     user = callback.from_user
     mute = await db.is_muted(user.id)
     if mute is not None:
-        await callback.answer("Вы замьючены и не можете создавать обращения", show_alert=True)
+        await callback.answer("Вы замучены и не можете создавать обращения", show_alert=True)
         return
 
     ticket = await db.get_open_ticket(user.id)
@@ -147,7 +147,7 @@ async def _warn_antispam(message: Message) -> None:
 
 async def _notify_muted(message: Message, mute: dict) -> None:
     until = datetime.fromisoformat(mute["until_at"])
-    text = f"🔇 Вы замьючены до {until:%Y-%m-%d %H:%M} (UTC)."
+    text = f"🔇 Вы замучены до {until:%Y-%m-%d %H:%M} (UTC)."
     if mute.get("reason"):
         text += f"\nПричина: {mute['reason']}"
     try:

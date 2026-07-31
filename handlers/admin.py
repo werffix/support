@@ -28,8 +28,9 @@ HELP_TEXT = (
     "• /close — закрыть тикет\n"
     "• /reopen — переоткрыть тикет\n"
     "• /info — информация о тикете (номер, user_id, username, статус)\n"
-    "• /mute <время> [причина] — замьютить пользователя тикета\n"
-    "    время: 30m, 5h, 2d (минуты, часы, дни)\n\n"
+    "• /mute <время> [причина] — замутить пользователя тикета\n"
+    "    время: 30m, 5h, 2d (минуты, часы, дни)\n"
+    "• /unmute — снять мут с пользователя тикета\n\n"
     "<b>В любом месте группы:</b>\n"
     "• /stats — статистика по тикетам\n"
     "• /help — эта справка"
@@ -107,6 +108,13 @@ async def on_admin_mute_command(message: Message, bot: Bot) -> None:
     if not await _is_admin(bot, message):
         return
     await _mute_user(bot, message)
+
+
+@router.message(GROUP_FILTER, F.is_topic_message, Command("unmute"))
+async def on_admin_unmute_command(message: Message, bot: Bot) -> None:
+    if not await _is_admin(bot, message):
+        return
+    await _unmute_user(bot, message)
 
 
 @router.message(GROUP_FILTER, Command("stats"))
@@ -253,12 +261,12 @@ async def _mute_user(bot: Bot, message: Message) -> None:
     )
 
     duration = _human_duration(seconds)
-    text = f"🔇 Пользователь <code>{ticket['user_id']}</code> замьючен на {duration}."
+    text = f"🔇 Пользователь <code>{ticket['user_id']}</code> замучен на {duration}."
     if reason:
         text += f"\nПричина: {reason}"
     await message.reply(text)
 
-    notify = f"🔇 Вы замьючены на {duration}."
+    notify = f"🔇 Вы замучены на {duration}."
     if reason:
         notify += f"\nПричина: {reason}"
     try:
@@ -267,6 +275,30 @@ async def _mute_user(bot: Bot, message: Message) -> None:
         logger.warning("Cannot notify user %s about mute", ticket["user_id"])
     except TelegramAPIError as exc:
         logger.warning("Failed to notify user %s about mute: %s", ticket["user_id"], exc)
+
+
+async def _unmute_user(bot: Bot, message: Message) -> None:
+    ticket = await db.get_ticket_by_thread(message.message_thread_id)
+    if ticket is None:
+        try:
+            await message.reply("⚠️ Команда /unmute работает только внутри темы тикета.")
+        except TelegramAPIError:
+            pass
+        return
+
+    await db.unmute_user(ticket["user_id"])
+    text = f"✅ Мут снят с пользователя <code>{ticket['user_id']}</code>."
+    await message.reply(text)
+
+    try:
+        await bot.send_message(
+            chat_id=ticket["user_id"],
+            text="✅ С вас снят мут. Вы снова можете писать и создавать обращения.",
+        )
+    except TelegramForbiddenError:
+        logger.warning("Cannot notify user %s about unmute", ticket["user_id"])
+    except TelegramAPIError as exc:
+        logger.warning("Failed to notify user %s about unmute: %s", ticket["user_id"], exc)
 
 
 async def _show_stats(message: Message) -> None:

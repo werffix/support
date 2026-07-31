@@ -125,6 +125,11 @@ class Database:
             )
             await self._conn.commit()
 
+    async def unmute_user(self, user_id: int) -> None:
+        async with self._lock:
+            await self._conn.execute("DELETE FROM mutes WHERE user_id = ?", (user_id,))
+            await self._conn.commit()
+
     async def is_muted(self, user_id: int) -> dict | None:
         async with self._lock:
             cursor = await self._conn.execute(
