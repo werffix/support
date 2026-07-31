@@ -1,5 +1,5 @@
 import logging
-import time
+import math
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ContentType
@@ -26,7 +26,10 @@ ticket_limiter = RateLimiter(
     limit=1,
     window=settings.antispam_ticket_cooldown_seconds,
 )
-_antispam_last_warning: dict[int, float] = {}
+
+
+def _seconds(seconds: float) -> int:
+    return max(1, math.ceil(seconds))
 
 MEDIA_CONTENT_TYPES = {
     ContentType.TEXT,
@@ -121,15 +124,11 @@ async def on_user_message(message: Message, state: FSMContext, bot: Bot) -> None
 
 async def _warn_antispam(message: Message) -> None:
     user_id = message.from_user.id
-    now = time.monotonic()
-    last = _antispam_last_warning.get(user_id, 0.0)
-    if now - last < settings.antispam_window_seconds:
-        return
-    _antispam_last_warning[user_id] = now
+    remaining = _seconds(message_limiter.cooldown(user_id))
     try:
         await message.answer(
-            "🐢 Вы отправляете сообщения слишком быстро. "
-            "Подождите немного и повторите попытку."
+            f"🐢 Вы отправляете сообщения слишком быстро.\n"
+            f"Подождите {remaining} сек. и повторите попытку."
         )
     except TelegramAPIError as exc:
         logger.debug("Failed to send antispam warning to user %s: %s", user_id, exc)
@@ -138,9 +137,10 @@ async def _warn_antispam(message: Message) -> None:
 async def _create_and_forward(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
     if settings.antispam_enabled and not ticket_limiter.allow(user_id):
+        remaining = _seconds(ticket_limiter.cooldown(user_id))
         await message.answer(
-            "⏳ Вы недавно создавали обращение. "
-            "Подождите немного перед созданием нового."
+            f"⏳ Вы недавно создавали обращение.\n"
+            f"Подождите {remaining} сек. перед созданием нового."
         )
         return
 
