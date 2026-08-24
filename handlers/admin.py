@@ -4,14 +4,14 @@ from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.enums import ChatMemberStatus
-from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from config import settings
 from database.db import db
-from handlers.user import ticket_title
-from keyboards.reply import main_menu_keyboard
+from services import tickets as ticket_service
+from services.tickets import ADMIN_CLOSE_CALLBACK
 
 logger = logging.getLogger(__name__)
 
@@ -71,11 +71,11 @@ def _human_duration(seconds: int) -> str:
     return f"{minutes} мин."
 
 
-async def _is_admin(bot: Bot, message: Message) -> bool:
+async def _is_admin(bot: Bot, user_id: int) -> bool:
     try:
-        member = await bot.get_chat_member(settings.admin_group_id, message.from_user.id)
+        member = await bot.get_chat_member(settings.admin_group_id, user_id)
     except TelegramAPIError as exc:
-        logger.debug("Failed to check admin status of %s: %s", message.from_user.id, exc)
+        logger.debug("Failed to check admin status of %s: %s", user_id, exc)
         return False
     return member.status in (ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR)
 
@@ -84,51 +84,75 @@ async def _is_admin(bot: Bot, message: Message) -> bool:
 async def on_admin_close_command(message: Message, bot: Bot) -> None:
     if not message.is_topic_message:
         return
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _close_ticket(bot, message)
 
 
 @router.message(GROUP_FILTER, F.is_topic_message, Command("reopen"))
 async def on_admin_reopen_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _reopen_ticket(bot, message)
 
 
 @router.message(GROUP_FILTER, F.is_topic_message, Command("info"))
 async def on_admin_info_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _info_ticket(bot, message)
 
 
 @router.message(GROUP_FILTER, F.is_topic_message, Command("mute"))
 async def on_admin_mute_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _mute_user(bot, message)
 
 
 @router.message(GROUP_FILTER, F.is_topic_message, Command("unmute"))
 async def on_admin_unmute_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _unmute_user(bot, message)
 
 
 @router.message(GROUP_FILTER, Command("stats"))
 async def on_admin_stats_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await _show_stats(message)
 
 
 @router.message(GROUP_FILTER, Command("help"))
 async def on_admin_help_command(message: Message, bot: Bot) -> None:
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
     await message.reply(HELP_TEXT)
+
+
+@router.callback_query(F.data.startswith(f"{ADMIN_CLOSE_CALLBACK}:"))
+async def on_admin_close_button(callback: CallbackQuery, bot: Bot) -> None:
+    if not await _is_admin(bot, callback.from_user.id):
+        await callback.answer("Недостаточно прав", show_alert=True)
+        return
+    try:
+        ticket_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+
+    ticket = await db.get_ticket(ticket_id)
+    if ticket is None:
+        await callback.answer("Тикет не найден", show_alert=True)
+        return
+
+    closed = await ticket_service.close_ticket(bot, ticket)
+    await callback.answer("Тикет закрыт" if closed else "Тикет уже закрыт")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError as exc:
+        logger.debug("Failed to remove admin close button for ticket #%s: %s", ticket_id, exc)
 
 
 @router.message(TOPIC_FILTER)
@@ -137,7 +161,7 @@ async def on_admin_message(message: Message, bot: Bot) -> None:
         return
     if message.text and message.text.startswith("/"):
         return
-    if not await _is_admin(bot, message):
+    if not await _is_admin(bot, message.from_user.id):
         return
 
     ticket = await db.get_ticket_by_thread(message.message_thread_id)
@@ -146,6 +170,7 @@ async def on_admin_message(message: Message, bot: Bot) -> None:
 
     try:
         await message.copy_to(chat_id=ticket["user_id"])
+        await db.touch_admin_activity(ticket["id"])
     except TelegramForbiddenError:
         logger.warning(
             "Cannot deliver reply to user %s (bot blocked); ticket #%s",
@@ -164,70 +189,36 @@ async def on_admin_message(message: Message, bot: Bot) -> None:
         )
 
 
+async def _close_ticket(bot: Bot, message: Message) -> None:
+    ticket = await db.get_ticket_by_thread(message.message_thread_id)
+    if ticket is None:
+        return
+    closed = await ticket_service.close_ticket(bot, ticket)
+    if not closed:
+        try:
+            await message.reply("ℹ️ Тикет уже закрыт.")
+        except TelegramAPIError:
+            pass
+
+
 async def _reopen_ticket(bot: Bot, message: Message) -> None:
     ticket = await db.get_ticket_by_thread(message.message_thread_id)
     if ticket is None:
         return
-    if ticket["status"] != "closed":
+    reopened = await ticket_service.reopen_ticket(bot, ticket)
+    if not reopened:
         try:
             await message.reply("ℹ️ Тикет уже открыт.")
         except TelegramAPIError:
             pass
-        return
-
-    await db.reopen_ticket(ticket["id"])
-    new_title = ticket_title(ticket["id"], ticket["user_id"], "🟢")
-    try:
-        await bot.edit_forum_topic(
-            chat_id=settings.admin_group_id,
-            message_thread_id=ticket["thread_id"],
-            name=new_title,
-        )
-    except TelegramAPIError as exc:
-        logger.warning("Failed to edit topic title for ticket #%s: %s", ticket["id"], exc)
-
-    logger.info("Ticket #%s reopened", ticket["id"])
-    try:
-        await bot.send_message(
-            chat_id=ticket["user_id"],
-            text=(
-                f"🟢 Ваш тикет <b>#{ticket['id']}</b> снова открыт.\n"
-                "Вы можете писать — ваши сообщения снова будут приходить к нам."
-            ),
-        )
-    except TelegramForbiddenError:
-        logger.warning(
-            "User %s blocked the bot; cannot notify about reopening ticket #%s",
-            ticket["user_id"],
-            ticket["id"],
-        )
-    except TelegramAPIError as exc:
-        logger.warning("Failed to notify user %s about reopening: %s", ticket["user_id"], exc)
 
 
 async def _info_ticket(bot: Bot, message: Message) -> None:
     ticket = await db.get_ticket_by_thread(message.message_thread_id)
     if ticket is None:
         return
-
-    username = "—"
-    try:
-        chat = await bot.get_chat(ticket["user_id"])
-        username = f"@{chat.username}" if chat.username else (chat.first_name or "—")
-    except TelegramAPIError as exc:
-        logger.debug("Failed to fetch chat for user %s: %s", ticket["user_id"], exc)
-
-    status = "🟢 открыт" if ticket["status"] == "open" else "🔴 закрыт"
-    text = (
-        f"📋 Тикет <b>#{ticket['id']}</b>\n"
-        f"Статус: {status}\n"
-        f"User ID: <code>{ticket['user_id']}</code>\n"
-        f"Username: {username}\n"
-        f"Создан: {ticket['created_at']}\n"
-    )
-    if ticket["closed_at"]:
-        text += f"Закрыт: {ticket['closed_at']}\n"
-    await message.reply(text)
+    username = await ticket_service.get_username(bot, ticket["user_id"])
+    await message.reply(ticket_service.format_ticket_info(ticket, username))
 
 
 async def _mute_user(bot: Bot, message: Message) -> None:
@@ -311,61 +302,3 @@ async def _show_stats(message: Message) -> None:
         f"Создано сегодня: {stats['today']}\n"
         f"Уникальных пользователей: {stats['users']}"
     )
-
-
-async def _close_ticket(bot: Bot, message: Message) -> None:
-    ticket = await db.get_ticket_by_thread(message.message_thread_id)
-    if ticket is None:
-        return
-
-    if ticket["status"] != "open":
-        try:
-            await message.reply("ℹ️ Тикет уже закрыт.")
-        except TelegramAPIError:
-            pass
-        return
-
-    await db.close_ticket(ticket["id"])
-    logger.info("Ticket #%s closed by admin", ticket["id"])
-
-    new_title = ticket_title(ticket["id"], ticket["user_id"], "🔴")
-    try:
-        await bot.edit_forum_topic(
-            chat_id=settings.admin_group_id,
-            message_thread_id=ticket["thread_id"],
-            name=new_title,
-        )
-    except TelegramAPIError as exc:
-        logger.warning("Failed to edit topic title for ticket #%s: %s", ticket["id"], exc)
-
-    if settings.close_topic_on_ticket_close:
-        try:
-            await bot.close_forum_topic(
-                chat_id=settings.admin_group_id,
-                message_thread_id=ticket["thread_id"],
-            )
-        except TelegramAPIError as exc:
-            logger.warning("Failed to close forum topic for ticket #%s: %s", ticket["id"], exc)
-
-    try:
-        await bot.send_message(
-            chat_id=ticket["user_id"],
-            text=(
-                f"🔒 Ваш тикет <b>#{ticket['id']}</b> закрыт.\n"
-                "Если появятся новые вопросы — нажмите кнопку «Создать обращение»."
-            ),
-            reply_markup=main_menu_keyboard(),
-        )
-    except TelegramForbiddenError:
-        logger.warning(
-            "User %s blocked the bot; cannot notify about closing ticket #%s",
-            ticket["user_id"],
-            ticket["id"],
-        )
-    except TelegramAPIError as exc:
-        logger.warning(
-            "Failed to notify user %s about ticket #%s closing: %s",
-            ticket["user_id"],
-            ticket["id"],
-            exc,
-        )

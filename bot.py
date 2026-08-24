@@ -9,6 +9,7 @@ from config import settings
 from database.db import db
 from handlers.admin import router as admin_router
 from handlers.user import router as user_router
+from services.auto_close import start_auto_close, stop_auto_close
 
 logger = logging.getLogger("bot")
 
@@ -21,11 +22,13 @@ def setup_logging() -> None:
     )
 
 
-async def on_startup() -> None:
+async def on_startup(bot: Bot) -> None:
     await db.init(settings.db_path)
+    start_auto_close(bot)
 
 
 async def on_shutdown() -> None:
+    await stop_auto_close()
     await db.close()
 
 

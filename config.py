@@ -17,6 +17,8 @@ class Settings:
     antispam_messages: int
     antispam_window_seconds: int
     antispam_ticket_cooldown_seconds: int
+    auto_close_hours: int
+    auto_close_check_minutes: int
 
 
 def _as_bool(value: str | None, default: bool) -> bool:
@@ -58,6 +60,8 @@ def load_settings() -> Settings:
         antispam_messages=_as_int(os.getenv("ANTISPAM_MESSAGES"), 5),
         antispam_window_seconds=_as_int(os.getenv("ANTISPAM_WINDOW_SECONDS"), 30),
         antispam_ticket_cooldown_seconds=_as_int(os.getenv("ANTISPAM_TICKET_COOLDOWN_SECONDS"), 60),
+        auto_close_hours=_as_int(os.getenv("AUTO_CLOSE_HOURS"), 24),
+        auto_close_check_minutes=_as_int(os.getenv("AUTO_CLOSE_CHECK_MINUTES"), 5),
     )
 
 

@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import aiosqlite
 
@@ -8,12 +8,14 @@ logger = logging.getLogger(__name__)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tickets (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id     INTEGER NOT NULL,
-    thread_id   INTEGER,
-    status      TEXT    NOT NULL DEFAULT 'open',
-    created_at  TEXT    NOT NULL,
-    closed_at   TEXT
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id           INTEGER NOT NULL,
+    thread_id         INTEGER,
+    status            TEXT    NOT NULL DEFAULT 'open',
+    created_at        TEXT    NOT NULL,
+    closed_at         TEXT,
+    last_user_msg_at  TEXT,
+    last_admin_msg_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_tickets_user_id   ON tickets (user_id);
@@ -51,8 +53,22 @@ class Database:
         await self._conn.execute("PRAGMA synchronous=NORMAL")
         await self._conn.execute("PRAGMA busy_timeout=5000")
         await self._conn.executescript(_SCHEMA)
+        await self._migrate()
         await self._conn.commit()
         logger.info("Database initialized at %s", path)
+
+    async def _migrate(self) -> None:
+        """Мягкие миграции: добавляет недостающие колонки в старые базы."""
+        cursor = await self._conn.execute("PRAGMA table_info(tickets)")
+        columns = {row[1] for row in await cursor.fetchall()}
+        migrations = {
+            "last_user_msg_at": "ALTER TABLE tickets ADD COLUMN last_user_msg_at TEXT",
+            "last_admin_msg_at": "ALTER TABLE tickets ADD COLUMN last_admin_msg_at TEXT",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                await self._conn.execute(statement)
+                logger.info("Migration applied: added column %s", column)
 
     async def close(self) -> None:
         if self._conn is not None:
@@ -61,9 +77,11 @@ class Database:
 
     async def create_ticket(self, user_id: int, thread_id: int | None = None) -> int:
         async with self._lock:
+            now = _now()
             cursor = await self._conn.execute(
-                "INSERT INTO tickets (user_id, thread_id, status, created_at) VALUES (?, ?, 'open', ?)",
-                (user_id, thread_id, _now()),
+                "INSERT INTO tickets (user_id, thread_id, status, created_at, last_user_msg_at) "
+                "VALUES (?, ?, 'open', ?, ?)",
+                (user_id, thread_id, now, now),
             )
             await self._conn.commit()
             return int(cursor.lastrowid)
@@ -98,6 +116,48 @@ class Database:
             )
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+    async def get_ticket(self, ticket_id: int) -> dict | None:
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT * FROM tickets WHERE id = ?",
+                (ticket_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def touch_user_activity(self, ticket_id: int) -> None:
+        async with self._lock:
+            await self._conn.execute(
+                "UPDATE tickets SET last_user_msg_at = ? WHERE id = ?",
+                (_now(), ticket_id),
+            )
+            await self._conn.commit()
+
+    async def touch_admin_activity(self, ticket_id: int) -> None:
+        async with self._lock:
+            await self._conn.execute(
+                "UPDATE tickets SET last_admin_msg_at = ? WHERE id = ?",
+                (_now(), ticket_id),
+            )
+            await self._conn.commit()
+
+    async def get_stale_tickets(self, hours: int) -> list[dict]:
+        """Открытые тикеты, где последнее сообщение — от администратора и прошло больше `hours` часов."""
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(hours=hours)
+        ).isoformat(timespec="seconds")
+        async with self._lock:
+            cursor = await self._conn.execute(
+                "SELECT * FROM tickets "
+                "WHERE status = 'open' "
+                "AND last_admin_msg_at IS NOT NULL "
+                "AND last_admin_msg_at <= ? "
+                "AND (last_user_msg_at IS NULL OR last_admin_msg_at > last_user_msg_at)",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def close_ticket(self, ticket_id: int) -> None:
         async with self._lock:

@@ -8,11 +8,12 @@ from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from config import settings
 from database.db import db
 from keyboards.reply import main_menu_keyboard
+from services.tickets import USER_CLOSE_CALLBACK, close_ticket, send_topic_info, ticket_title
 from utils.throttle import RateLimiter
 
 logger = logging.getLogger(__name__)
@@ -50,10 +51,6 @@ MEDIA_CONTENT_TYPES = {
 
 class TicketStates(StatesGroup):
     waiting_for_message = State()
-
-
-def ticket_title(ticket_id: int, user_id: int, emoji: str) -> str:
-    return f"{emoji} #{ticket_id} | ID: {user_id}"
 
 
 @router.message(CommandStart())
@@ -97,6 +94,30 @@ async def on_create_ticket(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
+@router.callback_query(F.data.startswith(f"{USER_CLOSE_CALLBACK}:"))
+async def on_user_close_ticket(callback: CallbackQuery, bot: Bot) -> None:
+    try:
+        ticket_id = int(callback.data.split(":", 1)[1])
+    except (IndexError, ValueError):
+        await callback.answer()
+        return
+
+    ticket = await db.get_ticket(ticket_id)
+    if ticket is None or ticket["user_id"] != callback.from_user.id:
+        await callback.answer("Тикет не найден", show_alert=True)
+        return
+    if ticket["status"] != "open":
+        await callback.answer("Тикет уже закрыт")
+        return
+
+    await close_ticket(bot, ticket)
+    await callback.answer("Тикет закрыт")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except TelegramAPIError as exc:
+        logger.debug("Failed to remove close button for user %s: %s", callback.from_user.id, exc)
+
+
 @router.message(F.chat.type == "private")
 async def on_user_message(message: Message, state: FSMContext, bot: Bot) -> None:
     if message.content_type not in MEDIA_CONTENT_TYPES:
@@ -117,14 +138,14 @@ async def on_user_message(message: Message, state: FSMContext, bot: Bot) -> None
 
     if await state.get_state() == TicketStates.waiting_for_message.state:
         if ticket is not None:
-            await _forward_to_thread(message, ticket["thread_id"])
+            await _forward_to_thread(message, ticket)
         else:
             await _create_and_forward(message, bot)
         await state.clear()
         return
 
     if ticket is not None:
-        await _forward_to_thread(message, ticket["thread_id"])
+        await _forward_to_thread(message, ticket)
     else:
         await message.answer(
             "📋 У вас нет открытого обращения.\n\n"
@@ -156,6 +177,19 @@ async def _notify_muted(message: Message, mute: dict) -> None:
         logger.debug("Failed to notify muted user %s: %s", message.from_user.id, exc)
 
 
+def _user_close_keyboard(ticket_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔒 Закрыть обращение",
+                    callback_data=f"{USER_CLOSE_CALLBACK}:{ticket_id}",
+                )
+            ]
+        ]
+    )
+
+
 async def _create_and_forward(message: Message, bot: Bot) -> None:
     user_id = message.from_user.id
     if settings.antispam_enabled and not ticket_limiter.allow(user_id):
@@ -182,7 +216,10 @@ async def _create_and_forward(message: Message, bot: Bot) -> None:
         return
 
     await db.set_thread(ticket_id, topic.message_thread_id)
+    ticket = await db.get_ticket(ticket_id)
     logger.info("New ticket #%s from user %s (thread %s)", ticket_id, user_id, topic.message_thread_id)
+
+    await send_topic_info(bot, topic.message_thread_id, ticket)
 
     try:
         await message.copy_to(
@@ -193,16 +230,18 @@ async def _create_and_forward(message: Message, bot: Bot) -> None:
         logger.error("Failed to copy first message of ticket #%s: %s", ticket_id, exc)
 
     await message.answer(
-        f"✅ Ваше обращение <b>#{ticket_id}</b> принято.\nОжидайте ответа."
+        f"✅ Ваше обращение <b>#{ticket_id}</b> принято.\nОжидайте ответа.",
+        reply_markup=_user_close_keyboard(ticket_id),
     )
 
 
-async def _forward_to_thread(message: Message, thread_id: int) -> None:
+async def _forward_to_thread(message: Message, ticket: dict) -> None:
     try:
         await message.copy_to(
             chat_id=settings.admin_group_id,
-            message_thread_id=thread_id,
+            message_thread_id=ticket["thread_id"],
         )
+        await db.touch_user_activity(ticket["id"])
     except TelegramAPIError as exc:
         logger.error(
             "Failed to forward message from user %s: %s",
