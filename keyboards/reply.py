@@ -9,13 +9,15 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="📨 Создать обращение",
-                    callback_data=TICKET_BUTTON_CALLBACK,
-                ),
-                InlineKeyboardButton(
                     text="⁉️ FAQ",
                     url="https://t.me/q1manual",
                 ),
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📨 Создать обращение",
+                    callback_data=TICKET_BUTTON_CALLBACK,
+                ),
+            ],
         ]
     )

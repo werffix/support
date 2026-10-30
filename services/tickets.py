@@ -2,7 +2,7 @@ import logging
 
 from aiogram import Bot
 from aiogram.exceptions import TelegramAPIError, TelegramForbiddenError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import CopyTextButton, InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import settings
 from database.db import db
@@ -44,7 +44,7 @@ def format_ticket_info(ticket: dict, username: str) -> str:
 
 
 async def send_topic_info(bot: Bot, thread_id: int, ticket: dict) -> None:
-    """Первое сообщение в теме: карточка пользователя + кнопка закрытия для админа."""
+    """Первое сообщение в теме: карточка пользователя и быстрые действия для админа."""
     username = await get_username(bot, ticket["user_id"])
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
@@ -53,7 +53,17 @@ async def send_topic_info(bot: Bot, thread_id: int, ticket: dict) -> None:
                     text="🔒 Закрыть обращение",
                     callback_data=f"{ADMIN_CLOSE_CALLBACK}:{ticket['id']}",
                 )
-            ]
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📋 Скопировать user ID",
+                    copy_text=CopyTextButton(text=str(ticket["user_id"])),
+                ),
+                InlineKeyboardButton(
+                    text="👤 Открыть аккаунт",
+                    url=f"tg://user?id={ticket['user_id']}",
+                ),
+            ],
         ]
     )
     try:
