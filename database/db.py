@@ -32,6 +32,11 @@ CREATE TABLE IF NOT EXISTS mutes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mutes_user_id ON mutes (user_id);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
 """
 
 
@@ -207,7 +212,9 @@ class Database:
 
     async def get_stats(self) -> dict:
         async with self._lock:
-            total = await self._fetch_scalar("SELECT COUNT(*) FROM tickets")
+            actual_total = await self._fetch_scalar("SELECT COUNT(*) FROM tickets")
+            baseline, baseline_actual_total = await self._get_ticket_baseline()
+            total = baseline + max(0, actual_total - baseline_actual_total)
             open_count = await self._fetch_scalar(
                 "SELECT COUNT(*) FROM tickets WHERE status = 'open'"
             )
@@ -225,6 +232,45 @@ class Database:
             "today": today,
             "users": users,
         }
+
+    async def set_ticket_baseline(self, count: int) -> None:
+        """Устанавливает число исторических тикетов и не даёт следующим ID его повторить."""
+        async with self._lock:
+            actual_total = await self._fetch_scalar("SELECT COUNT(*) FROM tickets")
+            for key, value in (
+                ("ticket_baseline", count),
+                ("ticket_baseline_actual_total", actual_total),
+            ):
+                await self._conn.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+            cursor = await self._conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'tickets'"
+            )
+            row = await cursor.fetchone()
+            current_sequence = int(row[0]) if row and row[0] is not None else 0
+            if count > current_sequence:
+                if row:
+                    await self._conn.execute(
+                        "UPDATE sqlite_sequence SET seq = ? WHERE name = 'tickets'",
+                        (count,),
+                    )
+                else:
+                    await self._conn.execute(
+                        "INSERT INTO sqlite_sequence (name, seq) VALUES ('tickets', ?)",
+                        (count,),
+                    )
+            await self._conn.commit()
+
+    async def _get_ticket_baseline(self) -> tuple[int, int]:
+        cursor = await self._conn.execute(
+            "SELECT key, value FROM app_settings "
+            "WHERE key IN ('ticket_baseline', 'ticket_baseline_actual_total')"
+        )
+        values = {row[0]: int(row[1]) for row in await cursor.fetchall()}
+        return values.get("ticket_baseline", 0), values.get("ticket_baseline_actual_total", 0)
 
     async def _fetch_scalar(self, query: str, params: tuple = ()) -> int:
         cursor = await self._conn.execute(query, params)

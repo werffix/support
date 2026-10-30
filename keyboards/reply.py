@@ -11,7 +11,11 @@ def main_menu_keyboard() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(
                     text="📨 Создать обращение",
                     callback_data=TICKET_BUTTON_CALLBACK,
-                )
+                ),
+                InlineKeyboardButton(
+                    text="⁉️ FAQ",
+                    url="https://t.me/q1manual",
+                ),
             ]
         ]
     )

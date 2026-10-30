@@ -33,6 +33,7 @@ HELP_TEXT = (
     "• /unmute — снять мут с пользователя тикета\n\n"
     "<b>В любом месте группы:</b>\n"
     "• /stats — статистика по тикетам\n"
+    "• /setcount число — задать начальное число исторических тикетов\n"
     "• /help — эта справка"
 )
 
@@ -122,6 +123,31 @@ async def on_admin_stats_command(message: Message, bot: Bot) -> None:
     if not await _is_admin(bot, message.from_user.id):
         return
     await _show_stats(message)
+
+
+@router.message(GROUP_FILTER, Command("setcount"))
+async def on_admin_setcount_command(message: Message, bot: Bot) -> None:
+    if not await _is_admin(bot, message.from_user.id):
+        return
+
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) != 2:
+        await message.reply("Использование: /setcount <число>\nНапример: /setcount 100")
+        return
+
+    try:
+        count = int(parts[1].strip())
+    except ValueError:
+        count = -1
+    if count < 0 or count > 9_223_372_036_854_775_806:
+        await message.reply("❌ Укажите целое число от 0 до 9223372036854775806.")
+        return
+
+    await db.set_ticket_baseline(count)
+    await message.reply(
+        f"✅ Начальное число тикетов установлено: {count}.\n"
+        f"Следующий новый тикет получит номер не ниже #{count + 1}."
+    )
 
 
 @router.message(GROUP_FILTER, Command("help"))
